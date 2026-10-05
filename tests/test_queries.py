@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from src.indexer import CollegeDocumentIndexer, DocumentIndexer
-from src.qa_pipeline import StudentHelpdeskQAPipeline
+from src.qa_pipeline import StudentHelpdeskQA, StudentHelpdeskQAPipeline
 from src.agent_coordinator import HelpdeskAgentCoordinator
 
 
@@ -129,3 +129,14 @@ class TestIndexerAndComponents:
         assert isinstance(context, str)
         assert len(context) > 50
         assert "Document Chunk" in context
+
+    def test_student_helpdesk_qa_answer_question(self):
+        qa = StudentHelpdeskQA()
+        result = qa.answer_question("What is the procedure for applying for a bonafide certificate?")
+        assert isinstance(result, dict)
+        assert "query" in result
+        assert "answer" in result
+        assert "context" in result
+        assert result["query"] == "What is the procedure for applying for a bonafide certificate?"
+        assert len(result["context"]) > 50
+        assert len(result["answer"]) > 10

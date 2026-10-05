@@ -9,7 +9,14 @@ Orchestrates multi-agent interactions between:
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 from typing import Any, Dict, Optional
+
+# Ensure project root is in sys.path when script is executed directly
+project_root = str(Path(__file__).resolve().parent.parent)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from dotenv import load_dotenv
 

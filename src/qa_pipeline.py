@@ -1,13 +1,20 @@
 """LangChain-powered QA and Answer Synthesis Pipeline.
 
-Combines retrieved context from LlamaIndex with prompt templates to generate
-grounded, comprehensive, and citation-rich student helpdesk answers.
+Combines retrieved context from LlamaIndex with grounded prompt templates to
+generate accurate, concise, and citation-rich student helpdesk answers.
 """
 
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Ensure project root is in sys.path when script is executed directly
+project_root = str(Path(__file__).resolve().parent.parent)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from dotenv import load_dotenv
 
@@ -17,120 +24,154 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
-from src.indexer import DocumentIndexer, get_default_indexer
+from src.indexer import CollegeDocumentIndexer, get_default_indexer
+
 
 STUDENT_HELPDESK_SYSTEM_PROMPT = """You are the official AI Academic Advisor and Student Helpdesk Assistant for Apex Institute of Technology & Sciences.
 
-Your mission is to provide accurate, clear, and reassuring answers to students regarding university policies, procedures, regulations, deadlines, and services.
+Your mission is to provide accurate, factual, and reassuring guidance to students regarding university policies, procedures, regulations, deadlines, and administrative services.
 
-Follow these strict guidelines:
-1. Grounding: Answer ONLY based on the provided Official College Policy Context. Do NOT invent policies or assume rules not mentioned.
-2. Structure your response clearly:
-   - **Direct Answer**: Provide a concise summary directly answering the student's question.
-   - **Key Regulations & Requirements**: Bullet points highlighting thresholds, documents needed, fees, or deadlines.
-   - **Action Steps**: Step-by-step guidance on how the student should proceed (e.g., ERP portal paths, counter numbers, office locations).
-   - **Official Reference & Contact**: Quote the Document ID (e.g., AITS-ADM-POL-014) and relevant contact email/office.
-3. If the provided context does not contain enough information to answer completely, acknowledge what is known and advise the student to contact the relevant department directly.
-4. Maintain an encouraging, professional, and empathetic tone.
+Strict Grounding Guidelines:
+1. Grounding: Answer based STRICTLY and ONLY on the provided Official College Document Context below. Do NOT extrapolate, speculate, or invent policies not stated in the context.
+2. Factuality & Conciseness: Keep responses concise, practical, and factual. Always cite official Document IDs (e.g., AITS-ADM-POL-014), required identification documents, deadlines, fees, and office counters/locations where applicable.
+3. Information Absence: If the provided context does not contain enough information to answer the question, politely and clearly state that the information is not available in the official college documents, and advise the student to contact the relevant administrative office.
 
-Official College Policy Context:
+Official College Document Context:
 ---------------------
 {context}
 ---------------------
 """
 
 
-class StudentHelpdeskQAPipeline:
-    """Orchestrates query answering using LangChain LLM chains and LlamaIndex context."""
+class StudentHelpdeskQA:
+    """Interfaces with language models and LlamaIndex context for grounded student helpdesk Q&A."""
 
     def __init__(
         self,
-        indexer: Optional[DocumentIndexer] = None,
+        indexer: Optional[CollegeDocumentIndexer] = None,
         model_name: str = "gpt-4o-mini",
-        temperature: float = 0.2,
+        temperature: float = 0.1,
     ) -> None:
         self.indexer = indexer or get_default_indexer()
         self.model_name = os.getenv("OPENAI_MODEL_NAME", model_name)
         self.temperature = temperature
         self.api_key = os.getenv("OPENAI_API_KEY", "")
 
-        self._init_chain()
+        self.chain = self.build_chain()
 
-    def _init_chain(self) -> None:
-        """Initializes the LangChain prompt template and runnable chain."""
+    def build_chain(self) -> Any:
+        """Constructs the runnable LangChain QA chain."""
         self.prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", STUDENT_HELPDESK_SYSTEM_PROMPT),
                 ("human", "{question}"),
             ]
         )
+
         if self.api_key and self.api_key != "your_openai_api_key_here":
-            self.llm = ChatOpenAI(
-                model=self.model_name,
-                temperature=self.temperature,
-                openai_api_key=self.api_key,
-            )
-            self.chain = self.prompt | self.llm | StrOutputParser()
-        else:
-            self.llm = None
-            self.chain = None
+            try:
+                self.llm = ChatOpenAI(
+                    model=self.model_name,
+                    temperature=self.temperature,
+                    openai_api_key=self.api_key,
+                )
+                return self.prompt | self.llm | StrOutputParser()
+            except Exception:
+                self.llm = None
+                return None
+
+        self.llm = None
+        return None
 
     def format_context(self, nodes: List[Any]) -> str:
-        """Formats retrieved context nodes into a consolidated text block with source tags."""
+        """Formats context nodes into a consolidated text block with source tags."""
         context_blocks = []
         for i, node in enumerate(nodes, start=1):
             file_name = getattr(node, "metadata", {}).get("file_name", "Official College Policy")
-            text = getattr(node, "text", str(node))
+            text = node.node.get_content() if hasattr(node, "node") else getattr(node, "text", str(node))
             context_blocks.append(f"--- [Source {i}: {file_name}] ---\n{text.strip()}")
         return "\n\n".join(context_blocks)
 
-    def answer_query(self, question: str, top_k: int = 4) -> Dict[str, Any]:
-        """Retrieves relevant context and generates a synthesized answer."""
+    def answer_question(self, query: str) -> Dict[str, Any]:
+        """Accepts a student query, retrieves context, and runs the QA chain.
+
+        Returns a dictionary containing:
+        - 'query': the original question
+        - 'answer': the generated response string
+        - 'context': the retrieved document snippets used for the answer
+        """
+        # Retrieve context from indexer
         if hasattr(self.indexer, "retrieve_nodes"):
-            retrieved_nodes = self.indexer.retrieve_nodes(question, top_k=top_k)
-            formatted_context = self.format_context(retrieved_nodes)
+            nodes = self.indexer.retrieve_nodes(query, top_k=3)
+            context = self.format_context(nodes) if nodes else self.indexer.retrieve_context(query, top_k=3)
             sources = [
                 node.metadata.get("file_name", "Unknown")
-                for node in retrieved_nodes
+                for node in nodes
                 if hasattr(node, "metadata")
             ]
-            node_count = len(retrieved_nodes)
         else:
-            formatted_context = self.indexer.retrieve_context(question, top_k=top_k)
+            context = self.indexer.retrieve_context(query, top_k=3)
             sources = []
-            node_count = 1 if formatted_context else 0
 
         if self.chain is not None:
-            raw_response = self.chain.invoke(
-                {"context": formatted_context, "question": question}
-            )
-            response_text = str(raw_response)
+            raw_response = self.chain.invoke({"context": context, "question": query})
+            answer = str(raw_response)
         else:
             # Fallback when running without an active OpenAI API key
-            response_text = (
+            answer = (
                 "[MOCK MODE - OPENAI_API_KEY not configured]\n"
-                f"Retrieved {node_count} policy document section(s).\n\n"
-                f"Top context preview:\n{formatted_context[:450]}..."
+                f"Retrieved college policy context for: '{query}'\n\n"
+                f"Context Preview:\n{context[:450]}..."
             )
 
         return {
-            "question": question,
-            "answer": response_text,
+            "query": query,
+            "answer": answer,
+            "context": context,
             "sources": list(dict.fromkeys(sources)),
-            "retrieved_nodes_count": node_count,
-            "context": formatted_context,
+        }
+
+    def answer_query(self, question: str, top_k: int = 4) -> Dict[str, Any]:
+        """Compatibility wrapper for answer_question returning legacy keys."""
+        res = self.answer_question(question)
+        return {
+            "question": question,
+            "query": question,
+            "answer": res["answer"],
+            "context": res["context"],
+            "sources": res.get("sources", []),
+            "retrieved_nodes_count": len(res.get("sources", [])) or (1 if res["context"] else 0),
         }
 
 
-def get_default_pipeline() -> StudentHelpdeskQAPipeline:
+# Aliases for backward compatibility
+StudentHelpdeskQAPipeline = StudentHelpdeskQA
+
+
+def get_default_pipeline() -> StudentHelpdeskQA:
     """Convenience factory function."""
-    return StudentHelpdeskQAPipeline()
+    return StudentHelpdeskQA()
 
 
 if __name__ == "__main__":
-    pipeline = get_default_pipeline()
-    sample_q = "How do I apply for a bonafide certificate and what ID is needed?"
-    print(f"Testing QA Pipeline with question: '{sample_q}'")
-    result = pipeline.answer_query(sample_q)
-    print(f"Sources: {result['sources']}")
-    print(f"Answer:\n{result['answer']}")
+    qa = StudentHelpdeskQA()
+    test_queries = [
+        "What is the procedure for applying for a bonafide certificate?",
+        "What is the minimum attendance requirement?",
+    ]
+
+    print("=" * 75)
+    print("🎓 Verifying StudentHelpdeskQA Pipeline (LangChain + LlamaIndex)")
+    print("=" * 75)
+
+    for idx, query in enumerate(test_queries, start=1):
+        print(f"\n[Test Query {idx}]: {query}\n")
+        response = qa.answer_question(query)
+
+        print("--- Answer ---")
+        print(response["answer"])
+
+        print("\n--- Retrieved Context Snippet ---")
+        preview = response["context"][:350].strip()
+        print(f"{preview}...\n")
+        print("-" * 75)
