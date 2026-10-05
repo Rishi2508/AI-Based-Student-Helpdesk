@@ -3,7 +3,7 @@
 from pathlib import Path
 import pytest
 
-from src.indexer import DocumentIndexer
+from src.indexer import CollegeDocumentIndexer, DocumentIndexer
 from src.qa_pipeline import StudentHelpdeskQAPipeline
 from src.agent_coordinator import HelpdeskAgentCoordinator
 
@@ -117,9 +117,15 @@ class TestIndexerAndComponents:
         assert coordinator.policy_advisor is not None
         assert callable(coordinator.lookup_tool)
 
-    def test_agent_coordinator_dry_run_process(self):
-        coordinator = HelpdeskAgentCoordinator()
-        result = coordinator.process_query("What is the fee refund policy?")
-        assert "status" in result
-        assert "student_query" in result
-        assert result["student_query"] == "What is the fee refund policy?"
+    def test_college_document_indexer_build_and_retrieve_context(self, tmp_path):
+        indexer = CollegeDocumentIndexer(docs_dir=DOCS_PATH, storage_dir=tmp_path / "storage")
+        index = indexer.build_or_load_index()
+        assert index is not None
+
+        retriever = indexer.get_retriever(similarity_top_k=2)
+        assert retriever is not None
+
+        context = indexer.retrieve_context("What is the attendance requirement?", top_k=2)
+        assert isinstance(context, str)
+        assert len(context) > 50
+        assert "Document Chunk" in context

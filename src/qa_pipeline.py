@@ -86,14 +86,19 @@ class StudentHelpdeskQAPipeline:
 
     def answer_query(self, question: str, top_k: int = 4) -> Dict[str, Any]:
         """Retrieves relevant context and generates a synthesized answer."""
-        retrieved_nodes = self.indexer.retrieve_context(question, top_k=top_k)
-        formatted_context = self.format_context(retrieved_nodes)
-
-        sources = [
-            node.metadata.get("file_name", "Unknown")
-            for node in retrieved_nodes
-            if hasattr(node, "metadata")
-        ]
+        if hasattr(self.indexer, "retrieve_nodes"):
+            retrieved_nodes = self.indexer.retrieve_nodes(question, top_k=top_k)
+            formatted_context = self.format_context(retrieved_nodes)
+            sources = [
+                node.metadata.get("file_name", "Unknown")
+                for node in retrieved_nodes
+                if hasattr(node, "metadata")
+            ]
+            node_count = len(retrieved_nodes)
+        else:
+            formatted_context = self.indexer.retrieve_context(question, top_k=top_k)
+            sources = []
+            node_count = 1 if formatted_context else 0
 
         if self.chain is not None:
             raw_response = self.chain.invoke(
@@ -104,7 +109,7 @@ class StudentHelpdeskQAPipeline:
             # Fallback when running without an active OpenAI API key
             response_text = (
                 "[MOCK MODE - OPENAI_API_KEY not configured]\n"
-                f"Retrieved {len(retrieved_nodes)} policy document section(s).\n\n"
+                f"Retrieved {node_count} policy document section(s).\n\n"
                 f"Top context preview:\n{formatted_context[:450]}..."
             )
 
@@ -112,7 +117,7 @@ class StudentHelpdeskQAPipeline:
             "question": question,
             "answer": response_text,
             "sources": list(dict.fromkeys(sources)),
-            "retrieved_nodes_count": len(retrieved_nodes),
+            "retrieved_nodes_count": node_count,
             "context": formatted_context,
         }
 
