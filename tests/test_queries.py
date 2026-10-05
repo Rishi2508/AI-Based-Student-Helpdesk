@@ -5,7 +5,7 @@ import pytest
 
 from src.indexer import CollegeDocumentIndexer, DocumentIndexer
 from src.qa_pipeline import StudentHelpdeskQA, StudentHelpdeskQAPipeline
-from src.agent_coordinator import HelpdeskAgentCoordinator
+from src.agent_coordinator import HelpdeskAgentCoordinator, StudentHelpdeskCoordinator
 
 
 DOCS_PATH = Path("./data/documents")
@@ -140,3 +140,14 @@ class TestIndexerAndComponents:
         assert result["query"] == "What is the procedure for applying for a bonafide certificate?"
         assert len(result["context"]) > 50
         assert len(result["answer"]) > 10
+
+    def test_student_helpdesk_coordinator_process_query(self):
+        coordinator = StudentHelpdeskCoordinator()
+        query = "What documents are required for examination registration?"
+        result = coordinator.process_query(query)
+        assert isinstance(result, dict)
+        assert result["query"] == query
+        assert "answer" in result and len(result["answer"]) > 10
+        assert "context" in result and len(result["context"]) > 10
+        assert result["agent_flow"] == ["StudentProxy", "HelpdeskCoordinator", "RetrievalQASpecialist"]
+        assert result["category"] == "exams"
