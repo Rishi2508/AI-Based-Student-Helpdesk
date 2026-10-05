@@ -144,38 +144,24 @@ def run_interactive_mode(use_agents: bool = True, show_context: bool = False) ->
 
 
 def launch_web_ui(show_context: bool = False) -> None:
-    """Launches a lightweight Gradio web interface if available, or falls back gracefully to CLI."""
-    try:
-        import gradio as gr
+    """Launches the Streamlit web interface on localhost."""
+    import subprocess
 
-        print("\n🚀 Launching Gradio Web Interface on http://localhost:7860 ...")
-        coordinator = get_default_coordinator()
+    streamlit_file = Path(project_root) / "streamlit_app.py"
+    if streamlit_file.exists():
+        print("\n🚀 Launching Streamlit Web Interface on http://localhost:8501 ...")
+        print("💡 Open your web browser and navigate to: http://localhost:8501\n")
+        cmd = [sys.executable, "-m", "streamlit", "run", str(streamlit_file), "--server.port", "8501"]
+        try:
+            subprocess.run(cmd)
+            return
+        except KeyboardInterrupt:
+            print("\nStreamlit server stopped.")
+            return
 
-        def respond(message: str, chat_history: list):
-            res = coordinator.process_query(message)
-            answer_text = res["answer"]
-            if show_context and res.get("context"):
-                answer_text += f"\n\n---\n**Grounding Context:**\n{res['context'][:600]}..."
-            return answer_text
-
-        demo = gr.ChatInterface(
-            fn=respond,
-            title="🎓 AI-Based Student Helpdesk",
-            description="Powered by AutoGen Multi-Agent Coordination, LlamaIndex Vector Retrieval, and LangChain Grounded QA.",
-            examples=[
-                "What is the procedure for applying for a bonafide certificate?",
-                "What documents are required for examination registration?",
-                "What is the attendance requirement and medical condonation limit?",
-                "What is the fee refund policy if admission is cancelled?",
-            ],
-        )
-        demo.launch(server_name="127.0.0.1", server_port=7860, share=False)
-
-    except ImportError:
-        print("\nℹ️  Web UI package ('gradio') is not installed in the current environment.")
-        print("💡 You can install it using: pip install gradio")
-        print("➡️  Falling back gracefully to interactive CLI mode...\n")
-        run_interactive_mode(use_agents=True, show_context=show_context)
+    # Fallback to interactive CLI
+    print("\nℹ️  streamlit_app.py not found. Falling back to interactive CLI...\n")
+    run_interactive_mode(use_agents=True, show_context=show_context)
 
 
 def main() -> None:
