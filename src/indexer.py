@@ -1,7 +1,8 @@
 """Document indexing and retrieval module using LlamaIndex.
 
-Responsible for ingesting college policy documents, generating embeddings,
-persisting vector indices, and providing retrieval capabilities.
+Responsible for ingesting college policy documents (Markdown, PDF, Text),
+generating embeddings, persisting vector indices to storage, and providing
+retrieval interfaces for student queries.
 """
 
 from __future__ import annotations
@@ -24,12 +25,10 @@ from llama_index.core import (
 from llama_index.core.readers import SimpleDirectoryReader
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.schema import NodeWithScore
-from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.llms.openai import OpenAI
 
 
-class DocumentIndexer:
-    """Manages document ingestion, vector index construction, and storage."""
+class CollegeDocumentIndexer:
+    """Manages document ingestion, vector index construction, persistence, and retrieval."""
 
     def __init__(
         self,
@@ -47,7 +46,7 @@ class DocumentIndexer:
         self.index: Optional[VectorStoreIndex] = None
 
     def _configure_settings(self) -> None:
-        """Configures global LlamaIndex LLM and Embedding settings."""
+        """Configures global LlamaIndex LLM and Embedding settings with offline fallbacks."""
         api_key = os.getenv("OPENAI_API_KEY")
         if api_key and api_key != "your_openai_api_key_here":
             try:
@@ -68,21 +67,27 @@ class DocumentIndexer:
         Settings.embed_model = MockEmbedding(embed_dim=16)
 
     def load_documents(self) -> List[Document]:
-        """Loads all markdown and text documents from the documents directory."""
+        """Loads all Markdown, PDF, and text documents from the documents directory."""
         if not self.docs_dir.exists():
             raise FileNotFoundError(f"Documents directory '{self.docs_dir}' does not exist.")
 
         reader = SimpleDirectoryReader(
             input_dir=str(self.docs_dir),
-            required_exts=[".md", ".txt"],
+            required_exts=[".pdf", ".md", ".txt"],
             recursive=True,
         )
         documents = reader.load_data()
         return documents
 
     def build_or_load_index(self, force_rebuild: bool = False) -> VectorStoreIndex:
-        """Loads an existing index from storage or builds a new one from documents."""
-        if not force_rebuild and (self.storage_dir / "docstore.json").exists():
+        """Handles indexing and persistence.
+
+        Checks if an existing index exists in the storage directory; if found,
+        reloads it via load_index_from_storage(StorageContext.from_defaults(persist_dir=...)).
+        If no existing index is found, builds a VectorStoreIndex and persists it to storage.
+        """
+        docstore_path = self.storage_dir / "docstore.json"
+        if not force_rebuild and docstore_path.exists():
             storage_context = StorageContext.from_defaults(persist_dir=str(self.storage_dir))
             self.index = load_index_from_storage(storage_context)
             return self.index
@@ -97,30 +102,60 @@ class DocumentIndexer:
         self.index.storage_context.persist(persist_dir=str(self.storage_dir))
         return self.index
 
-    def get_retriever(self, similarity_top_k: int = 4) -> VectorIndexRetriever:
-        """Returns a vector index retriever for fetching context nodes."""
+    def get_retriever(self, similarity_top_k: int = 3) -> VectorIndexRetriever:
+        """Returns the raw LlamaIndex retriever object against the vector store."""
         if self.index is None:
             self.build_or_load_index()
         assert self.index is not None
         return self.index.as_retriever(similarity_top_k=similarity_top_k)
 
-    def retrieve_context(self, query: str, top_k: int = 4) -> List[NodeWithScore]:
-        """Retrieves top scoring nodes matching the input query."""
+    def retrieve_nodes(self, query: str, top_k: int = 3) -> List[NodeWithScore]:
+        """Retrieves raw scored context nodes for a given query."""
         retriever = self.get_retriever(similarity_top_k=top_k)
         return retriever.retrieve(query)
 
+    def retrieve_context(self, query: str, top_k: int = 3) -> str:
+        """Runs a retriever against the vector store and returns the relevant context as a cleanly concatenated text string."""
+        nodes = self.retrieve_nodes(query, top_k=top_k)
+        if not nodes:
+            return "No relevant college policy context found."
 
-def get_default_indexer() -> DocumentIndexer:
-    """Convenience factory function for the default DocumentIndexer."""
+        chunks = []
+        for i, node in enumerate(nodes, start=1):
+            file_name = getattr(node, "metadata", {}).get("file_name", "College Policy Document")
+            content = node.node.get_content() if hasattr(node, "node") else getattr(node, "text", str(node))
+            chunks.append(f"=== [Document Chunk {i} | Source: {file_name}] ===\n{content.strip()}")
+
+        return "\n\n".join(chunks)
+
+
+# Alias for backward compatibility
+DocumentIndexer = CollegeDocumentIndexer
+
+
+def get_default_indexer() -> CollegeDocumentIndexer:
+    """Convenience factory function for the default CollegeDocumentIndexer."""
     docs_dir = os.getenv("DOCUMENTS_DIR", "./data/documents")
     storage_dir = os.getenv("STORAGE_DIR", "./storage")
-    return DocumentIndexer(docs_dir=docs_dir, storage_dir=storage_dir)
+    return CollegeDocumentIndexer(docs_dir=docs_dir, storage_dir=storage_dir)
 
 
 if __name__ == "__main__":
+    test_query = "What is the procedure for applying for a bonafide certificate?"
+    print(f"=== Verifying Document Indexing & Retrieval ===")
     indexer = get_default_indexer()
-    print(f"Checking documents in: {indexer.docs_dir.resolve()}")
+
+    print(f"\n1. Ingesting documents from: {indexer.docs_dir.resolve()}")
     docs = indexer.load_documents()
-    print(f"Loaded {len(docs)} document chunks.")
-    for d in docs:
-        print(f" - {d.metadata.get('file_name', 'Unknown')}")
+    print(f"   Loaded {len(docs)} document chunk(s).")
+
+    print(f"\n2. Building or loading vector index from: {indexer.storage_dir.resolve()}")
+    indexer.build_or_load_index()
+    print("   Vector index ready and persisted.")
+
+    print(f"\n3. Running test retrieval for query:\n   \"{test_query}\"\n")
+    retrieved_chunk = indexer.retrieve_context(test_query, top_k=3)
+
+    print("--- Retrieved Context Chunk(s) ---")
+    print(retrieved_chunk)
+    print("----------------------------------")
