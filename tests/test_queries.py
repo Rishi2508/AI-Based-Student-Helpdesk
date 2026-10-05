@@ -151,3 +151,69 @@ class TestIndexerAndComponents:
         assert "context" in result and len(result["context"]) > 10
         assert result["agent_flow"] == ["StudentProxy", "HelpdeskCoordinator", "RetrievalQASpecialist"]
         assert result["category"] == "exams"
+
+
+SAMPLE_STUDENT_QUERIES = [
+    (
+        "What is the procedure for applying for a bonafide certificate?",
+        ["bonafide", "certificate"],
+    ),
+    (
+        "What documents are required for examination registration?",
+        ["exam", "hall ticket"],
+    ),
+    (
+        "What is the attendance requirement?",
+        ["attendance", "75%"],
+    ),
+    (
+        "How can a fee receipt be obtained?",
+        ["fee", "receipt"],
+    ),
+    (
+        "What are the library timings?",
+        ["library", "reading"],
+    ),
+    (
+        "What is the last date for course registration?",
+        ["course", "registration"],
+    ),
+    (
+        "What is the procedure for applying for a transfer certificate?",
+        ["transfer", "clearance"],
+    ),
+    (
+        "Can attendance shortage be condoned on medical grounds?",
+        ["medical", "condonation"],
+    ),
+    (
+        "What is the fee refund policy if admission is cancelled?",
+        ["refund", "withdrawal"],
+    ),
+    (
+        "How many books can a student borrow from the library?",
+        ["borrow", "books"],
+    ),
+]
+
+
+class TestSampleQueriesEvaluation:
+    """Evaluates 10 core student queries against the Coordinator and QA retrieval pipeline."""
+
+    @pytest.mark.parametrize("query,expected_keywords", SAMPLE_STUDENT_QUERIES)
+    def test_sample_query_grounded_answer(self, query: str, expected_keywords: list):
+        coordinator = StudentHelpdeskCoordinator()
+        response = coordinator.process_query(query)
+
+        assert isinstance(response, dict), "Response must be a dictionary"
+        assert response["query"] == query, "Query in response must match original input"
+        assert len(response["answer"]) > 20, f"Answer for query '{query}' was too short"
+        assert len(response["context"]) > 50, f"Context for query '{query}' was insufficient"
+        assert response["agent_flow"] == ["StudentProxy", "HelpdeskCoordinator", "RetrievalQASpecialist"]
+
+        context_lower = response["context"].lower()
+        has_grounding = any(kw.lower() in context_lower for kw in expected_keywords)
+        assert has_grounding, (
+            f"Retrieved context for query '{query}' did not contain any expected keywords: {expected_keywords}"
+        )
+

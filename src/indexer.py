@@ -110,9 +110,48 @@ class CollegeDocumentIndexer:
         return self.index.as_retriever(similarity_top_k=similarity_top_k)
 
     def retrieve_nodes(self, query: str, top_k: int = 3) -> List[NodeWithScore]:
-        """Retrieves raw scored context nodes for a given query."""
+        """Retrieves raw scored context nodes for a given query, augmented with keyword relevance."""
         retriever = self.get_retriever(similarity_top_k=top_k)
-        return retriever.retrieve(query)
+        retrieved_nodes = retriever.retrieve(query)
+
+        # In offline/mock mode or as hybrid re-ranking, boost nodes matching query terms
+        api_key = os.getenv("OPENAI_API_KEY")
+        is_mock_mode = not api_key or api_key == "your_openai_api_key_here"
+
+        if is_mock_mode and hasattr(self.index, "docstore") and self.index.docstore.docs:
+            stop_words = {
+                "what", "is", "the", "for", "if", "a", "an", "can", "how", "are",
+                "of", "in", "to", "be", "from", "by", "many", "do", "does", "on"
+            }
+            keywords = [
+                w.strip("?,.:;\"'()")
+                for w in query.lower().split()
+                if w.strip("?,.:;\"'()") and w.strip("?,.:;\"'()") not in stop_words
+            ]
+            if keywords:
+                scored_nodes = []
+                for doc_id, doc in self.index.docstore.docs.items():
+                    text = doc.get_content().lower()
+                    fn = doc.metadata.get("file_name", "").lower()
+                    kw_score = sum(text.count(kw) + (15 if kw in fn else 0) for kw in keywords)
+                    if kw_score > 0:
+                        scored_nodes.append((kw_score, NodeWithScore(node=doc, score=float(kw_score))))
+
+                if scored_nodes:
+                    scored_nodes.sort(key=lambda x: x[0], reverse=True)
+                    seen_texts = set()
+                    final_nodes = []
+                    for _, node in scored_nodes:
+                        txt = node.node.get_content()
+                        if txt not in seen_texts:
+                            seen_texts.add(txt)
+                            final_nodes.append(node)
+                        if len(final_nodes) >= top_k:
+                            break
+                    if final_nodes:
+                        return final_nodes
+
+        return retrieved_nodes
 
     def retrieve_context(self, query: str, top_k: int = 3) -> str:
         """Runs a retriever against the vector store and returns the relevant context as a cleanly concatenated text string."""
