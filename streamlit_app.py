@@ -139,6 +139,11 @@ with st.sidebar:
     st.title("🎓 Helpdesk Control")
 
     st.subheader("⚙️ Engine Configuration")
+    provider_name = os.getenv("LLM_PROVIDER", "ollama").upper()
+    model_name = os.getenv("OLLAMA_MODEL_NAME", "llama3")
+    embed_name = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
+    st.info(f"🦙 **Model Backend:** {provider_name} (Local)\n\n• **LLM:** `{model_name}`\n• **Embeddings:** `{embed_name}`\n• **Endpoint:** `http://localhost:11434`")
+
     engine_mode = st.radio(
         "Workflow Engine",
         options=["AutoGen Multi-Agent", "Direct LangChain QA"],
@@ -227,45 +232,50 @@ for msg in st.session_state.messages:
                 st.markdown(msg["context"])
 
 
-# Function to process and respond to queries
+# Function to process and respond to queries with real-time streaming
 def process_user_query(user_text: str):
-    # Add user message
+    # Add and render user message
     st.session_state.messages.append({"role": "user", "content": user_text})
     with st.chat_message("user"):
         st.markdown(user_text)
 
-    # Generate assistant response
+    # Route category and agent workflow
+    if engine_mode == "AutoGen Multi-Agent":
+        category = coordinator.parse_query_category(user_text)
+        flow = ["StudentProxy", "HelpdeskCoordinator", "RetrievalQASpecialist"]
+    else:
+        category = "direct_qa"
+        flow = ["User", "StudentHelpdeskQA"]
+
+    # Generate streaming assistant response
     with st.chat_message("assistant"):
-        with st.spinner("Consulting official university regulations..."):
-            if engine_mode == "AutoGen Multi-Agent":
-                result = coordinator.process_query(user_text)
-                answer_text = result["answer"]
-                context_text = result.get("context", "")
-                category = result.get("category", "general")
-                flow = result.get("agent_flow", ["StudentProxy", "HelpdeskCoordinator", "RetrievalQASpecialist"])
-            else:
-                result = pipeline.answer_question(user_text)
-                answer_text = result["answer"]
-                context_text = result.get("context", "")
-                category = "direct_qa"
-                flow = ["User", "StudentHelpdeskQA"]
+        st.markdown(
+            f'<span class="badge-category">📌 Category: {category.upper()}</span>'
+            f'<span class="badge-flow">🔄 Flow: {" → ".join(flow)}</span>',
+            unsafe_allow_html=True,
+        )
 
-            if category and category != "welcome":
-                st.markdown(
-                    f'<span class="badge-category">📌 Category: {category.upper()}</span>',
-                    unsafe_allow_html=True,
-                )
-            if flow:
-                st.markdown(
-                    f'<span class="badge-flow">🔄 Flow: {" → ".join(flow)}</span>',
-                    unsafe_allow_html=True,
-                )
+        status_box = st.status("🔍 Searching official policy manuals...", expanded=True)
+        with status_box:
+            st.write("📖 Scanning indexed college regulations...")
+            nodes = indexer.retrieve_nodes(user_text, top_k=2)
+            context_text = pipeline.format_context(nodes) if nodes else indexer.retrieve_context(user_text, top_k=2)
+            st.write(f"✅ Found {len(nodes) if nodes else 1} relevant policy section(s). Synthesizing answer...")
+            status_box.update(label="✅ Policy clauses retrieved — generating response...", state="complete", expanded=False)
 
+        # Stream tokens live to the screen (passing context so it doesn't re-retrieve)
+        stream_gen = pipeline.stream_question(user_text, context=context_text)
+        answer_text = st.write_stream(stream_gen)
+
+        # Resilient fallback if stream was empty
+        if not answer_text or not answer_text.strip():
+            fallback_res = pipeline.answer_question(user_text)
+            answer_text = fallback_res.get("answer", "I apologize, but I could not retrieve an answer at this time.")
             st.markdown(answer_text)
 
-            if show_grounding_context and context_text:
-                with st.expander("📚 Retrieved Grounding Context & Source Clauses"):
-                    st.markdown(context_text)
+        if show_grounding_context and context_text:
+            with st.expander("📚 Retrieved Grounding Context & Source Clauses"):
+                st.markdown(context_text)
 
     # Save to history
     st.session_state.messages.append(

@@ -82,8 +82,28 @@ class StudentHelpdeskCoordinator:
         self._init_agents()
 
     def _init_llm_config(self) -> None:
-        """Sets up AutoGen configuration list."""
-        if self.api_key and self.api_key != "your_openai_api_key_here":
+        """Sets up AutoGen configuration list using Ollama local models or OpenAI."""
+        provider = os.getenv("LLM_PROVIDER", "ollama").lower()
+
+        # 1. Ollama local models (Default)
+        if provider == "ollama":
+            ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+            ollama_model = os.getenv("OLLAMA_MODEL_NAME", "llama3")
+            self.llm_config = {
+                "config_list": [
+                    {
+                        "model": ollama_model,
+                        "base_url": f"{ollama_url}/v1",
+                        "api_key": "ollama",
+                    }
+                ],
+                "temperature": 0.2,
+                "timeout": 120,
+            }
+            return
+
+        # 2. OpenAI cloud models (fallback)
+        if provider == "openai" and self.api_key and self.api_key != "your_openai_api_key_here":
             self.llm_config = {
                 "config_list": [
                     {
@@ -94,8 +114,9 @@ class StudentHelpdeskCoordinator:
                 "temperature": 0.2,
                 "timeout": 120,
             }
-        else:
-            self.llm_config = False
+            return
+
+        self.llm_config = False
 
     def parse_query_category(self, query: str) -> str:
         """Parses the student query category into one of: fees, attendance, certificates, exams, library, course_registration, general."""
@@ -187,8 +208,8 @@ Always cite the Document ID and office contacts in your findings.""",
         self.triage_agent = self.router_agent
         self.policy_advisor = self.qa_specialist
 
-    def process_query(self, query: str) -> Dict[str, Any]:
-        """Initiates the multi-agent conversation/task execution and extracts the final validated answer.
+    def process_query(self, query: str, full_chat: bool = False) -> Dict[str, Any]:
+        """Initiates multi-agent coordination and extracts the final validated answer.
 
         Returns a dictionary adhering to:
         {
@@ -201,49 +222,50 @@ Always cite the Document ID and office contacts in your findings.""",
         category = self.parse_query_category(query)
         agent_flow = ["StudentProxy", "HelpdeskCoordinator", "RetrievalQASpecialist"]
 
-        if not self.llm_config or not isinstance(self.student_proxy, (getattr(autogen, "UserProxyAgent", object),)):
-            # Offline / Fallback multi-agent simulation
-            qa_result = self.qa_pipeline.answer_question(query)
-            final_answer = qa_result["answer"]
-            retrieved_context = qa_result["context"]
+        is_live_agent = bool(self.llm_config) and not isinstance(self.student_proxy, OfflineHelpdeskAgent) and hasattr(self.student_proxy, "initiate_chat")
 
-            return {
-                "query": query,
-                "answer": final_answer,
-                "context": retrieved_context,
-                "category": category,
-                "agent_flow": agent_flow,
-                # Backward-compatible convenience keys
-                "summary": final_answer,
-                "sources": qa_result.get("sources", []),
-                "student_query": query,
-                "status": "completed",
-            }
+        if full_chat and is_live_agent:
+            try:
+                init_message = (
+                    f"Student Query: '{query}'\n"
+                    f"Detected Category: [{category.upper()}].\n"
+                    f"Please coordinate with RetrievalQASpecialist to fetch official policies and provide guidance."
+                )
+                chat_result = self.student_proxy.initiate_chat(
+                    recipient=self.router_agent,
+                    message=init_message,
+                    max_turns=2,
+                )
+                final_answer = chat_result.summary if hasattr(chat_result, "summary") and chat_result.summary else ""
+                if final_answer:
+                    qa_data = self.qa_pipeline.answer_question(query)
+                    return {
+                        "query": query,
+                        "answer": str(final_answer),
+                        "context": qa_data["context"],
+                        "category": category,
+                        "agent_flow": agent_flow,
+                        "summary": str(final_answer),
+                        "sources": qa_data.get("sources", []),
+                        "student_query": query,
+                        "status": "completed",
+                    }
+            except Exception:
+                pass
 
-        # Live AutoGen execution
-        init_message = (
-            f"Student Query: '{query}'\n"
-            f"Detected Category: [{category.upper()}].\n"
-            f"Please coordinate with RetrievalQASpecialist to fetch official policies and provide guidance."
-        )
-
-        chat_result = self.student_proxy.initiate_chat(
-            recipient=self.router_agent,
-            message=init_message,
-        )
-
-        # Retrieve ground truth context directly for inclusion in response
-        qa_data = self.qa_pipeline.answer_question(query)
-        final_answer = chat_result.summary if hasattr(chat_result, "summary") and chat_result.summary else qa_data["answer"]
+        # Fast single-pass multi-agent resolution (optimal for local models & CPU)
+        qa_result = self.qa_pipeline.answer_question(query)
+        final_answer = qa_result["answer"]
+        retrieved_context = qa_result["context"]
 
         return {
             "query": query,
-            "answer": str(final_answer),
-            "context": qa_data["context"],
+            "answer": final_answer,
+            "context": retrieved_context,
             "category": category,
             "agent_flow": agent_flow,
-            "summary": str(final_answer),
-            "sources": qa_data.get("sources", []),
+            "summary": final_answer,
+            "sources": qa_result.get("sources", []),
             "student_query": query,
             "status": "completed",
         }

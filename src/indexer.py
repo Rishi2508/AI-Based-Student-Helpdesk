@@ -46,9 +46,34 @@ class CollegeDocumentIndexer:
         self.index: Optional[VectorStoreIndex] = None
 
     def _configure_settings(self) -> None:
-        """Configures global LlamaIndex LLM and Embedding settings with offline fallbacks."""
+        """Configures global LlamaIndex LLM and Embedding settings (Ollama local, OpenAI, or Mock)."""
+        provider = os.getenv("LLM_PROVIDER", "ollama").lower()
+
+        # Configure node parser chunking for compact, fast context retrieval
+        from llama_index.core.node_parser import SentenceSplitter
+        Settings.chunk_size = 400
+        Settings.chunk_overlap = 50
+        Settings.node_parser = SentenceSplitter(chunk_size=400, chunk_overlap=50)
+
+        # 1. Ollama local models (Default)
+        if provider == "ollama":
+            try:
+                from llama_index.llms.ollama import Ollama
+                from llama_index.embeddings.ollama import OllamaEmbedding
+
+                ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+                ollama_model = os.getenv("OLLAMA_MODEL_NAME", "llama3")
+                ollama_embed = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
+
+                Settings.llm = Ollama(model=ollama_model, base_url=ollama_url, request_timeout=120.0)
+                Settings.embed_model = OllamaEmbedding(model_name=ollama_embed, base_url=ollama_url)
+                return
+            except Exception:
+                pass
+
+        # 2. OpenAI provider (if explicitly chosen and configured)
         api_key = os.getenv("OPENAI_API_KEY")
-        if api_key and api_key != "your_openai_api_key_here":
+        if provider == "openai" and api_key and api_key != "your_openai_api_key_here":
             try:
                 from llama_index.llms.openai import OpenAI
                 from llama_index.embeddings.openai import OpenAIEmbedding
@@ -59,7 +84,7 @@ class CollegeDocumentIndexer:
             except Exception:
                 pass
 
-        # Offline fallback for testing and development without live API keys
+        # 3. Offline fallback for testing and development
         from llama_index.core.embeddings.mock_embed_model import MockEmbedding
         from llama_index.core.llms.mock import MockLLM
 
@@ -114,9 +139,10 @@ class CollegeDocumentIndexer:
         retriever = self.get_retriever(similarity_top_k=top_k)
         retrieved_nodes = retriever.retrieve(query)
 
-        # In offline/mock mode or as hybrid re-ranking, boost nodes matching query terms
+        # In offline/mock mode (only when neither Ollama nor OpenAI is available), boost nodes matching query terms
+        provider = os.getenv("LLM_PROVIDER", "ollama").lower()
         api_key = os.getenv("OPENAI_API_KEY")
-        is_mock_mode = not api_key or api_key == "your_openai_api_key_here"
+        is_mock_mode = (provider != "ollama") and (not api_key or api_key == "your_openai_api_key_here")
 
         if is_mock_mode and hasattr(self.index, "docstore") and self.index.docstore.docs:
             stop_words = {

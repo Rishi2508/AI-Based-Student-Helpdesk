@@ -32,9 +32,9 @@ STUDENT_HELPDESK_SYSTEM_PROMPT = """You are the official AI Academic Advisor and
 Your mission is to provide accurate, factual, and reassuring guidance to students regarding university policies, procedures, regulations, deadlines, and administrative services.
 
 Strict Grounding Guidelines:
-1. Grounding: Answer based STRICTLY and ONLY on the provided Official College Document Context below. Do NOT extrapolate, speculate, or invent policies not stated in the context.
-2. Factuality & Conciseness: Keep responses concise, practical, and factual. Always cite official Document IDs (e.g., AITS-ADM-POL-014), required identification documents, deadlines, fees, and office counters/locations where applicable.
-3. Information Absence: If the provided context does not contain enough information to answer the question, politely and clearly state that the information is not available in the official college documents, and advise the student to contact the relevant administrative office.
+1. Grounding: Answer based STRICTLY and ONLY on the provided Official College Document Context below. Do NOT extrapolate or guess.
+2. Factuality & Conciseness: Be direct, structured, and concise. Present the essential points, required IDs, forms, deadlines, fees, and office counters in 2 to 4 bullet points or short paragraphs.
+3. Information Absence: If the provided context does not contain the answer, politely state that the information is not available in the official college documents, and advise contacting the relevant administrative office.
 
 Official College Document Context:
 ---------------------
@@ -60,7 +60,7 @@ class StudentHelpdeskQA:
         self.chain = self.build_chain()
 
     def build_chain(self) -> Any:
-        """Constructs the runnable LangChain QA chain."""
+        """Constructs the runnable LangChain QA chain using Ollama local models or OpenAI."""
         self.prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", STUDENT_HELPDESK_SYSTEM_PROMPT),
@@ -68,7 +68,30 @@ class StudentHelpdeskQA:
             ]
         )
 
-        if self.api_key and self.api_key != "your_openai_api_key_here":
+        provider = os.getenv("LLM_PROVIDER", "ollama").lower()
+
+        # 1. Ollama local models (Default)
+        if provider == "ollama":
+            try:
+                from langchain_ollama import ChatOllama
+
+                ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+                ollama_model = os.getenv("OLLAMA_MODEL_NAME", "llama3")
+
+                self.llm = ChatOllama(
+                    model=ollama_model,
+                    base_url=ollama_url,
+                    temperature=self.temperature,
+                    num_predict=220,   # Concise answers for fast CPU inference
+                    num_ctx=2048,      # Compact context window for fast CPU generation
+                    request_timeout=120.0,
+                )
+                return self.prompt | self.llm | StrOutputParser()
+            except Exception:
+                pass
+
+        # 2. OpenAI cloud models (fallback)
+        if provider == "openai" and self.api_key and self.api_key != "your_openai_api_key_here":
             try:
                 self.llm = ChatOpenAI(
                     model=self.model_name,
@@ -77,8 +100,7 @@ class StudentHelpdeskQA:
                 )
                 return self.prompt | self.llm | StrOutputParser()
             except Exception:
-                self.llm = None
-                return None
+                pass
 
         self.llm = None
         return None
@@ -100,26 +122,26 @@ class StudentHelpdeskQA:
         - 'answer': the generated response string
         - 'context': the retrieved document snippets used for the answer
         """
-        # Retrieve context from indexer
+        # Retrieve context from indexer (top_k=2 provides precise policy clauses without context bloat)
         if hasattr(self.indexer, "retrieve_nodes"):
-            nodes = self.indexer.retrieve_nodes(query, top_k=3)
-            context = self.format_context(nodes) if nodes else self.indexer.retrieve_context(query, top_k=3)
+            nodes = self.indexer.retrieve_nodes(query, top_k=2)
+            context = self.format_context(nodes) if nodes else self.indexer.retrieve_context(query, top_k=2)
             sources = [
                 node.metadata.get("file_name", "Unknown")
                 for node in nodes
                 if hasattr(node, "metadata")
             ]
         else:
-            context = self.indexer.retrieve_context(query, top_k=3)
+            context = self.indexer.retrieve_context(query, top_k=2)
             sources = []
 
         if self.chain is not None:
             raw_response = self.chain.invoke({"context": context, "question": query})
             answer = str(raw_response)
         else:
-            # Fallback when running without an active OpenAI API key
+            # Fallback when running without an active LLM provider
             answer = (
-                "[MOCK MODE - OPENAI_API_KEY not configured]\n"
+                "[OFFLINE MODE - LLM not configured]\n"
                 f"Retrieved college policy context for: '{query}'\n\n"
                 f"Context Preview:\n{context[:450]}..."
             )
@@ -130,6 +152,30 @@ class StudentHelpdeskQA:
             "context": context,
             "sources": list(dict.fromkeys(sources)),
         }
+
+    def stream_question(self, query: str, context: Optional[str] = None):
+        """Yields answer chunks in real-time for responsive streaming UI."""
+        if context is None:
+            if hasattr(self.indexer, "retrieve_nodes"):
+                nodes = self.indexer.retrieve_nodes(query, top_k=2)
+                context = self.format_context(nodes) if nodes else self.indexer.retrieve_context(query, top_k=2)
+            else:
+                context = self.indexer.retrieve_context(query, top_k=2)
+
+        if self.chain is not None and hasattr(self, "llm") and self.llm is not None:
+            formatted_prompt = self.prompt.format_messages(context=context, question=query)
+            try:
+                for chunk in self.llm.stream(formatted_prompt):
+                    content = getattr(chunk, "content", str(chunk))
+                    if content:
+                        yield content
+                return
+            except Exception:
+                pass
+
+        # Fallback to direct answer if streaming fails
+        res = self.answer_question(query)
+        yield res["answer"]
 
     def answer_query(self, question: str, top_k: int = 4) -> Dict[str, Any]:
         """Compatibility wrapper for answer_question returning legacy keys."""
